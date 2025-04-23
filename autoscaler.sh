@@ -21,7 +21,6 @@ get_trend() {
   local n=${#numbers[@]}
   local sumX=0 sumY=0 sumXY=0 sumX2=0
 
-  # Compute sums needed for slope calculation
   for ((i = 0; i < n; i++)); do
     local x=$((i + 1))
     local y=${numbers[$i]}
@@ -34,16 +33,13 @@ get_trend() {
   local numerator=$((n * sumXY - sumX * sumY))
   local denominator=$((n * sumX2 - sumX * sumX))
 
-  # Avoid division by zero (constant input case)
   if [ "$denominator" -eq 0 ]; then
     echo "stable"
     return
   fi
 
-  # Calculate slope using bc for floating point division
   local slope=$(echo "scale=5; $numerator / $denominator" | bc)
 
-  # Decide trend based on slope thresholds
   if (( $(echo "$slope > 0.1" | bc -l) )); then
     echo "up"
   elif (( $(echo "$slope < -0.1" | bc -l) )); then
@@ -58,10 +54,8 @@ machines_needed() {
   local messages=$1
   local capacity=$2
 
-  # Ceiling division: (messages + capacity - 1) / capacity
   local result=$(( (messages + capacity - 1) / capacity ))
 
-  # Clamp between 1 and 10
   if [ "$result" -gt 10 ]; then
     echo 10
   elif [ "$result" -lt 1 ]; then
@@ -71,53 +65,61 @@ machines_needed() {
   fi
 }
 
+# Function to log
+log() {
+  local message=$1
+  echo "$message"
+}
+
+# Function to change
+change() {
+  local number=$1
+  local trend=$2
+  local machines=$3
+  log "Current: $number | CHANGE Trend: $trend | Machines needed: $machines"
+}
+
 # Read input line by line
 while IFS= read -r line || [ -n "$line" ]; do
-  number=$(echo "$line" | xargs)  # Trim leading/trailing whitespace
+  number=$(echo "$line" | xargs)
 
-  # Ignore non-numeric lines
   if ! [[ "$number" =~ ^[0-9]+$ ]]; then
-    echo "Skipping invalid input: '$number'"
+    log "Skipping invalid input: '$number'"
     continue
   fi
 
-  window+=("$number")             # Add to window
+  window+=("$number")
 
-  # Ensure window only contains the last 5 values
   if [ ${#window[@]} -gt 5 ]; then
     window=("${window[@]:1}")
   fi
 
-  # Wait for at least 5 data points before analysis
   if [ ${#window[@]} -lt 5 ]; then
-    echo "Current: $number | Not enough data for trend analysis"
+    log "Current: $number | Not enough data for trend analysis"
     continue
   fi
 
   trend=$(get_trend "${window[@]}")
   needed=$(machines_needed "$number" "$capacityPerMachine")
 
-  # First-time setup of tracking variables
   if [ -z "$currentTrend" ]; then
     currentTrend=$trend
     cooldownCounter=5
     currentMachines=$needed
-    echo "Current: $number | CHANGE Trend: $currentTrend | Machines needed: $needed"
+    change "$number" "$currentTrend" "$needed"
 
-  # If in cooldown, do not change
   elif [ "$cooldownCounter" -gt 0 ]; then
     cooldownCounter=$((cooldownCounter - 1))
-    echo "Current: $number | NO ACTION (cooldown: $cooldownCounter)"
+    log "Current: $number | NO ACTION (cooldown: $cooldownCounter)"
 
-  # If not in cooldown, apply changes if needed
   else
     if [ "$needed" -ne "$currentMachines" ]; then
       currentTrend=$trend
       cooldownCounter=5
       currentMachines=$needed
-      echo "Current: $number | CHANGE Trend: $trend | Machines needed: $needed"
+      change "$number" "$currentTrend" "$needed"
     else
-      echo "Current: $number | NO ACTION"
+      log "Current: $number | NO ACTION"
     fi
   fi
 done
