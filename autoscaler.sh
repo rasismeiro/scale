@@ -1,27 +1,34 @@
 #!/bin/bash
+set -euo pipefail
 
-# Check if the user provided the required argument (messages per machine)
+# Usage check
 if [ $# -lt 1 ]; then
-  echo "Usage: $0 <messages_per_machine>  < data.csv"
+  echo "Usage: $0 <messages_per_machine> [logfile] < data.csv"
   exit 1
 fi
 
-capacityPerMachine=$1                    # Message processing capacity per machine
-declare -a window=()                     # Sliding window to hold the last 5 message volumes
-currentTrend=""                          # Track the current trend (up/down/stable)
-currentMachines=0                        # Current number of machines in use
-cooldownCounter=0                        # Cooldown counter to prevent frequent scaling
+capacity_per_machine=$1
+logfile="${2:-}"  # Optional: pass a log file to log output
 
-# Function to determine the trend (up/down/stable) based on linear regression over the last 5 data points
+window=()
+current_trend=""
+current_machines=0
+cooldown_counter=0
+
+log() {
+  echo "$1"
+  [[ -n "$logfile" ]] && echo "$1" >> "$logfile"
+}
+
+# Function: Determine trend from 5 data points using linear regression
 get_trend() {
-  local numbers=($@)
-  local n=${#numbers[@]}
+  local values=("$@")
+  local n=${#values[@]}
   local sumX=0 sumY=0 sumXY=0 sumX2=0
 
-  # Calculate necessary values for the least squares regression formula
-  for ((i = 0; i < n; i++)); do
-    x=$((i+1))
-    y=${numbers[$i]}
+  for ((i=0; i<n; i++)); do
+    local x=$((i+1))
+    local y=${values[i]}
     sumX=$((sumX + x))
     sumY=$((sumY + y))
     sumXY=$((sumXY + x * y))
@@ -31,82 +38,70 @@ get_trend() {
   local numerator=$((n * sumXY - sumX * sumY))
   local denominator=$((n * sumX2 - sumX * sumX))
 
-  # Avoid division by zero
-  if [ "$denominator" -eq 0 ]; then
+  if [[ "$denominator" -eq 0 ]]; then
     echo "stable"
     return
   fi
 
-  # Calculate slope to determine trend
-  slope=$(echo "scale=5; $numerator / $denominator" | bc)
+  local slope
+  slope=$(awk -v num="$numerator" -v den="$denominator" 'BEGIN { printf "%.5f", num / den }')
 
-  # Determine trend direction based on slope thresholds
-  if [ "$(echo "$slope > 0.1" | bc)" -eq 1 ]; then
+  if (( $(awk "BEGIN {print ($slope > 0.1)}") )); then
     echo "up"
-  elif [ "$(echo "$slope < -0.1" | bc)" -eq 1 ]; then
+  elif (( $(awk "BEGIN {print ($slope < -0.1)}") )); then
     echo "down"
   else
     echo "stable"
   fi
 }
 
-# Function to calculate how many machines are needed to handle the current message load
+# Function: Calculate machines needed based on current volume and capacity
 machines_needed() {
   local messages=$1
   local capacity=$2
-  # Ceiling division to avoid partial machine counts
-  local result=$(echo "($messages + $capacity - 1)/$capacity" | bc)
-  
-  # Clamp result between 1 and 10 machines
-  if [ "$result" -gt 10 ]; then
-    echo 10
-  elif [ "$result" -lt 1 ]; then
-    echo 1
-  else
-    echo "$result"
+  local result=$(( (messages + capacity - 1) / capacity ))
+
+  if [[ $result -gt 10 ]]; then echo 10
+  elif [[ $result -lt 1 ]]; then echo 1
+  else echo "$result"
   fi
 }
 
-# Read message volume line by line
-while IFS= read -r line || [ -n "$line" ]; do
-  number=$(echo "$line" | xargs)  # Trim whitespace
-  window+=("$number")             # Add to the sliding window
+# Main loop
+while IFS= read -r line || [[ -n "$line" ]]; do
+  line=$(echo "$line" | xargs)  # Trim whitespace
+  [[ "$line" =~ ^[0-9]+$ ]] || { log "Skipping invalid input: $line"; continue; }
 
-  # Keep only the last 5 entries in the window
-  if [ ${#window[@]} -gt 5 ]; then
+  number=$line
+  window+=("$number")
+  if (( ${#window[@]} > 5 )); then
     window=("${window[@]:1}")
   fi
 
-  # Wait until we have enough data points for trend analysis
-  if [ ${#window[@]} -lt 5 ]; then
-    echo "Current: $number | Not enough data for trend analysis"
+  if (( ${#window[@]} < 5 )); then
+    log "Current: $number | Not enough data for trend analysis"
     continue
   fi
 
-  trend=$(get_trend "${window[@]}")                        # Determine trend
-  needed=$(machines_needed "$number" "$capacityPerMachine") # Determine required machines
+  trend=$(get_trend "${window[@]}")
+  needed=$(machines_needed "$number" "$capacity_per_machine")
 
-  # Initialize tracking values on first analysis
-  if [ -z "$currentTrend" ]; then
-    currentTrend=$trend
-    cooldownCounter=5
-    currentMachines=$needed
-    echo "Current: $number | CHANGE Trend: $currentTrend | Machines needed: $needed"
-
-  # During cooldown, don't make changes
-  elif [ $cooldownCounter -gt 0 ]; then
-    cooldownCounter=$((cooldownCounter - 1))
-    echo "Current: $number | NO ACTION"
-
-  # When not in cooldown, check if scaling is needed
+  if [[ -z "$current_trend" ]]; then
+    current_trend=$trend
+    cooldown_counter=5
+    current_machines=$needed
+    log "Current: $number | CHANGE Trend: $current_trend | Machines needed: $needed"
+  elif (( cooldown_counter > 0 )); then
+    ((cooldown_counter--))
+    log "Current: $number | NO ACTION"
   else
-    if [ "$needed" -ne "$currentMachines" ]; then
-      currentTrend=$trend
-      cooldownCounter=5
-      currentMachines=$needed
-      echo "Current: $number | CHANGE Trend: $trend | Machines needed: $needed"
+    if [[ "$needed" -ne "$current_machines" ]]; then
+      current_trend=$trend
+      cooldown_counter=5
+      current_machines=$needed
+      log "Current: $number | CHANGE Trend: $trend | Machines needed: $needed"
     else
-      echo "Current: $number | NO ACTION"
+      log "Current: $number | NO ACTION"
     fi
   fi
 done
